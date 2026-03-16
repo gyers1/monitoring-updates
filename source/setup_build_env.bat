@@ -1,0 +1,7 @@
+@echo off
+setlocal EnableExtensions
+set "BASE=%~dp0"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%BASE%build_release.ps1" -PrepareOnly
+set "RC=%ERRORLEVEL%"
+if not "%RC%"=="0" pause
+exit /b %RC%

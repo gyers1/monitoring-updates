@@ -1,0 +1,38 @@
+# Keep the repo focused on source and docs only.
+/build/
+/release/
+/output/
+/.playwright-cli/
+/archive/
+
+# Python caches and local environments.
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+venv_webview/
+
+# Local secrets, state, and logs.
+**/.env
+!**/.env.example
+*.log
+*.tmp
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+auth_cache.json
+ui_prefs.json
+apply_update.bat
+apply_update.ps1
+update_restart.log
+startup.log
+.interval_defaults_20m_migrated
+_update_stage/
+
+# OS noise.
+Thumbs.db
+.DS_Store

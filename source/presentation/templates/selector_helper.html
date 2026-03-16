@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Selector Helper</title>
+    <base href="__BASE_HREF__">
+    __HEAD_LINKS__
+    <style>
+        :root {
+            color-scheme: light;
+        }
+        html, body {
+            width: 100%;
+            height: 100%;
+        }
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: #ffffff;
+        }
+        #remoteContent {
+            padding: 16px;
+            min-height: 100%;
+            box-sizing: border-box;
+        }
+        .selector-overlay {
+            position: fixed;
+            top: 12px;
+            right: 12px;
+            background: rgba(20, 20, 20, 0.75);
+            color: #fff;
+            padding: 8px 12px;
+            border-radius: 10px;
+            font-size: 12px;
+            z-index: 99999;
+            backdrop-filter: blur(6px);
+        }
+        .selector-overlay strong {
+            display: block;
+            font-size: 12px;
+        }
+        .selector-hover {
+            outline: 2px solid rgba(90, 208, 194, 0.9) !important;
+            outline-offset: 2px;
+        }
+        .selector-picked {
+            outline: 2px solid rgba(255, 140, 0, 0.9) !important;
+            outline-offset: 2px;
+        }
+    </style>
+</head>
+<body>
+    <div class="selector-overlay" id="selectorBadge">
+        <strong>선택 모드</strong>
+        <span id="selectorModeLabel">제목</span>
+    </div>
+    <div id="remoteContent">__REMOTE_BODY__</div>
+
+    <script>
+        (function () {
+            const remoteRoot = document.getElementById('remoteContent');
+            const badge = document.getElementById('selectorModeLabel');
+            let currentMode = 'title';
+            let hoverEl = null;
+            let pickedEl = null;
+
+            function cssEscape(value) {
+                if (window.CSS && CSS.escape) return CSS.escape(value);
+                return value.replace(/[^a-zA-Z0-9_-]/g, '\\\\$&');
+            }
+
+            function setMode(mode) {
+                currentMode = mode === 'date' ? 'date' : 'title';
+                badge.textContent = currentMode === 'date' ? '날짜' : '제목';
+            }
+
+            function buildSelector(el) {
+                if (!el || el === remoteRoot || el.nodeType !== 1) return '';
+                const parts = [];
+                let node = el;
+                while (node && node !== remoteRoot && node.nodeType === 1) {
+                    let part = node.tagName.toLowerCase();
+                    if (node.id) {
+                        part += `#${cssEscape(node.id)}`;
+                        parts.unshift(part);
+                        break;
+                    }
+                    const classes = Array.from(node.classList || []).filter(c => c && !c.startsWith('selector-'));
+                    if (classes.length) {
+                        part += `.${classes.map(cssEscape).join('.')}`;
+                    }
+                    parts.unshift(part);
+                    if (classes.length && parts.length >= 2) {
+                        break;
+                    }
+                    node = node.parentElement;
+                }
+                let selector = parts.join(' ');
+                selector = simplifySelector(selector);
+                return selector;
+            }
+
+            function simplifySelector(selector) {
+                if (!selector) return '';
+                const parts = selector.split(' ');
+                if (parts.length <= 1) return selector;
+                for (let i = 0; i < parts.length; i++) {
+                    const candidate = parts.slice(i).join(' ');
+                    try {
+                        const count = remoteRoot.querySelectorAll(candidate).length;
+                        if (count > 1) return candidate;
+                    } catch (e) {
+                        continue;
+                    }
+                }
+                return selector;
+            }
+
+            function getSamples(selector) {
+                if (!selector) return { count: 0, samples: [] };
+                let nodes = [];
+                try {
+                    nodes = Array.from(remoteRoot.querySelectorAll(selector));
+                } catch (e) {
+                    return { count: 0, samples: [] };
+                }
+                const samples = nodes.slice(0, 5).map(n => {
+                    const text = (n.textContent || '').replace(/\\s+/g, ' ').trim();
+                    return text.slice(0, 120);
+                }).filter(Boolean);
+                return { count: nodes.length, samples };
+            }
+
+            function clearHover() {
+                if (hoverEl) hoverEl.classList.remove('selector-hover');
+                hoverEl = null;
+            }
+
+            function clearPicked() {
+                if (pickedEl) pickedEl.classList.remove('selector-picked');
+                pickedEl = null;
+            }
+
+            document.addEventListener('mouseover', (event) => {
+                if (!remoteRoot.contains(event.target)) return;
+                clearHover();
+                hoverEl = event.target;
+                hoverEl.classList.add('selector-hover');
+            });
+
+            document.addEventListener('mouseout', (event) => {
+                if (!remoteRoot.contains(event.target)) return;
+                if (hoverEl) hoverEl.classList.remove('selector-hover');
+            });
+
+            document.addEventListener('click', (event) => {
+                if (!remoteRoot.contains(event.target)) return;
+                event.preventDefault();
+                event.stopPropagation();
+                clearPicked();
+                pickedEl = event.target;
+                pickedEl.classList.add('selector-picked');
+                const selector = buildSelector(event.target);
+                const { count, samples } = getSamples(selector);
+                window.parent.postMessage({
+                    type: 'selector-picked',
+                    mode: currentMode,
+                    selector,
+                    count,
+                    samples
+                }, '*');
+            }, true);
+
+            function findByText(query) {
+                const needle = (query || '').trim();
+                if (!needle) {
+                    window.parent.postMessage({ type: 'selector-error', message: '텍스트를 입력하세요.' }, '*');
+                    return;
+                }
+                const candidates = remoteRoot.querySelectorAll('a, td, th, li, span, div, p');
+                let best = null;
+                let bestLen = Infinity;
+                candidates.forEach(el => {
+                    const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+                    if (!text) return;
+                    if (text.includes(needle)) {
+                        if (text.length < bestLen) {
+                            best = el;
+                            bestLen = text.length;
+                        }
+                    }
+                });
+                if (!best) {
+                    window.parent.postMessage({ type: 'selector-error', message: '해당 텍스트를 찾지 못했습니다.' }, '*');
+                    return;
+                }
+                clearPicked();
+                pickedEl = best;
+                pickedEl.classList.add('selector-picked');
+                const selector = buildSelector(best);
+                const { count, samples } = getSamples(selector);
+                window.parent.postMessage({
+                    type: 'selector-picked',
+                    mode: currentMode,
+                    selector,
+                    count,
+                    samples
+                }, '*');
+            }
+
+            window.addEventListener('message', (event) => {
+                const data = event?.data || {};
+                if (data.type === 'set-mode') {
+                    setMode(data.mode);
+                }
+                if (data.type === 'find-text') {
+                    if (data.mode) setMode(data.mode);
+                    findByText(data.query || '');
+                }
+            });
+
+            setMode(currentMode);
+            window.parent.postMessage({ type: 'selector-ready' }, '*');
+        })();
+    </script>
+</body>
+</html>
