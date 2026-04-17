@@ -5484,9 +5484,16 @@
             const titleEl = document.getElementById('siteSelector');
             const dateEl = document.getElementById('siteDateSelector');
             const dateFormatEl = document.getElementById('siteDateFormat');
+            const keepRawEl = document.getElementById('siteKeepRawSelectors');
             if (titleEl && payload.titleSelector) titleEl.value = payload.titleSelector;
             if (dateEl) dateEl.value = payload.dateSelector || '';
             if (dateFormatEl && payload.dateFormat) dateFormatEl.value = payload.dateFormat;
+            const requiresRawSelectors = !!payload.keepRawSelectors ||
+                /:nth-(?:child|of-type)\(/i.test(payload.titleSelector || '') ||
+                /:nth-(?:child|of-type)\(/i.test(payload.dateSelector || '');
+            if (keepRawEl && requiresRawSelectors) {
+                keepRawEl.checked = true;
+            }
             if (!isSelectorHelperMode && !options.keepOpen) {
                 closeSelectorHelper();
             }

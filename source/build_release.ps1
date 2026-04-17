@@ -147,7 +147,7 @@ function Ensure-BuildEnvironment([string]$SourceDir) {
         throw 'pyarmor.exe was not found after setup.'
     }
 
-    return @{
+    return [PSCustomObject]@{
         Python = $pythonExe
         PyInstaller = $pyinstallerExe
         PyArmor = $pyarmorExe

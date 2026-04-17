@@ -28,17 +28,22 @@
             position: fixed;
             top: 12px;
             right: 12px;
-            background: rgba(20, 20, 20, 0.75);
+            background: rgba(20, 20, 20, 0.78);
             color: #fff;
-            padding: 8px 12px;
+            padding: 10px 12px;
             border-radius: 10px;
             font-size: 12px;
             z-index: 99999;
             backdrop-filter: blur(6px);
+            box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
         }
         .selector-overlay strong {
             display: block;
             font-size: 12px;
+        }
+        .selector-overlay span {
+            display: block;
+            margin-top: 4px;
         }
         .selector-hover {
             outline: 2px solid rgba(90, 208, 194, 0.9) !important;
@@ -52,27 +57,85 @@
 </head>
 <body>
     <div class="selector-overlay" id="selectorBadge">
-        <strong>선택 모드</strong>
-        <span id="selectorModeLabel">제목</span>
+        <strong id="selectorModeLabel">제목 선택 모드</strong>
+        <span id="selectorStepLabel">1번째 항목 클릭</span>
     </div>
     <div id="remoteContent">__REMOTE_BODY__</div>
 
     <script>
         (function () {
             const remoteRoot = document.getElementById('remoteContent');
-            const badge = document.getElementById('selectorModeLabel');
-            let currentMode = 'title';
+            const modeLabel = document.getElementById('selectorModeLabel');
+            const stepLabel = document.getElementById('selectorStepLabel');
+            const state = {
+                mode: 'title',
+                titleClicks: [],
+                dateClicks: [],
+                titleSelector: '',
+                dateSelector: '',
+            };
+
+            const DATE_PATTERNS = [
+                /\b\d{4}[./-]\d{1,2}[./-]\d{1,2}\s*[~~-]\s*\d{4}[./-]\d{1,2}[./-]\d{1,2}\b/,
+                /\b\d{4}[./-]\d{1,2}[./-]\d{1,2}\b/,
+                /\b\d{4}년\s*\d{1,2}월\s*\d{1,2}일(?:\s*[~~-]\s*\d{4}년\s*\d{1,2}월\s*\d{1,2}일)?\b/,
+            ];
+
             let hoverEl = null;
             let pickedEl = null;
 
+            function normalizeText(value) {
+                return String(value || '').replace(/\s+/g, ' ').trim();
+            }
+
             function cssEscape(value) {
                 if (window.CSS && CSS.escape) return CSS.escape(value);
-                return value.replace(/[^a-zA-Z0-9_-]/g, '\\\\$&');
+                return String(value || '').replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+            }
+
+            function extractDateValue(text) {
+                const source = normalizeText(text);
+                if (!source) return '';
+                for (const pattern of DATE_PATTERNS) {
+                    const match = source.match(pattern);
+                    if (match) return match[0];
+                }
+                return '';
+            }
+
+            function getNodePreviewText(node, mode) {
+                const raw = normalizeText(node && node.textContent);
+                if (!raw) return '';
+                if (mode === 'date') return extractDateValue(raw);
+                return raw.slice(0, 120);
+            }
+
+            function getSamples(selector, mode) {
+                if (!selector) return { count: 0, validCount: 0, samples: [] };
+                let nodes = [];
+                try {
+                    nodes = Array.from(remoteRoot.querySelectorAll(selector));
+                } catch (e) {
+                    return { count: 0, validCount: 0, samples: [] };
+                }
+                const texts = nodes.map(node => getNodePreviewText(node, mode)).filter(Boolean);
+                return {
+                    count: nodes.length,
+                    validCount: texts.length,
+                    samples: texts.slice(0, 5),
+                };
             }
 
             function setMode(mode) {
-                currentMode = mode === 'date' ? 'date' : 'title';
-                badge.textContent = currentMode === 'date' ? '날짜' : '제목';
+                state.mode = mode === 'date' ? 'date' : 'title';
+                updateBadge();
+            }
+
+            function updateBadge() {
+                const isTitle = state.mode === 'title';
+                const clicks = isTitle ? state.titleClicks.length : state.dateClicks.length;
+                modeLabel.textContent = isTitle ? '제목 선택 모드' : '날짜 선택 모드';
+                stepLabel.textContent = clicks === 0 ? '1번째 항목 클릭' : clicks === 1 ? '2번째 항목 클릭' : '선택 완료';
             }
 
             function buildSelector(el) {
@@ -96,9 +159,7 @@
                     }
                     node = node.parentElement;
                 }
-                let selector = parts.join(' ');
-                selector = simplifySelector(selector);
-                return selector;
+                return simplifySelector(parts.join(' '));
             }
 
             function simplifySelector(selector) {
@@ -117,19 +178,124 @@
                 return selector;
             }
 
-            function getSamples(selector) {
-                if (!selector) return { count: 0, samples: [] };
+            function buildPath(el) {
+                const parts = [];
+                let node = el;
+                while (node && node !== remoteRoot && node.nodeType === 1) {
+                    let part = node.tagName.toLowerCase();
+                    if (node.id) {
+                        part += `#${cssEscape(node.id)}`;
+                        parts.push(part);
+                        break;
+                    }
+                    const classes = Array.from(node.classList || []).filter(c => c && !c.startsWith('selector-'));
+                    if (classes.length) {
+                        part += `.${classes.map(cssEscape).join('.')}`;
+                    }
+                    parts.push(part);
+                    node = node.parentElement;
+                }
+                return parts;
+            }
+
+            function deriveCommonSelector(el1, el2) {
+                if (!el1 || !el2) return '';
+                const path = buildPath(el1);
+                let best = '';
+                let bestCount = Infinity;
+                for (let i = 0; i < path.length; i++) {
+                    const candidate = path.slice(i).reverse().join(' ');
+                    if (!candidate) continue;
+                    try {
+                        const matches = remoteRoot.querySelectorAll(candidate);
+                        const count = matches.length;
+                        if (count < 2) continue;
+                        if (!el1.matches(candidate) || !el2.matches(candidate)) continue;
+                        if (count < bestCount) {
+                            best = candidate;
+                            bestCount = count;
+                        }
+                    } catch (e) {
+                        continue;
+                    }
+                }
+                return best || buildSelector(el1);
+            }
+
+            function getElementIndex(el) {
+                if (!el || !el.parentElement) return -1;
+                return Array.from(el.parentElement.children).indexOf(el) + 1;
+            }
+
+            function getSelectionNode(el, mode) {
+                const node = el && el.nodeType === 1 ? el : el?.parentElement;
+                if (!node || node === remoteRoot) return null;
+                const selector = mode === 'date'
+                    ? 'time, td, th, li, dd, dt, p, span, div'
+                    : 'a, td, th, li, dd, dt, h1, h2, h3, h4, h5, p, span, div';
+                const found = node.closest(selector);
+                return found && found !== remoteRoot ? found : node;
+            }
+
+            function deriveIndexedSiblingSelector(el1, el2, mode) {
+                const node1 = getSelectionNode(el1, mode);
+                const node2 = getSelectionNode(el2, mode);
+                if (!node1 || !node2) return '';
+                if (node1.tagName !== node2.tagName) return '';
+                const index1 = getElementIndex(node1);
+                const index2 = getElementIndex(node2);
+                if (index1 < 1 || index1 !== index2) return '';
+                const parent1 = node1.parentElement;
+                const parent2 = node2.parentElement;
+                if (!parent1 || !parent2) return '';
+                const parentSelector = deriveCommonSelector(parent1, parent2);
+                if (!parentSelector) return '';
+                return `${parentSelector} > ${node1.tagName.toLowerCase()}:nth-child(${index1})`;
+            }
+
+            function scoreCandidate(selector, el1, el2, mode) {
+                if (!selector) return Number.NEGATIVE_INFINITY;
                 let nodes = [];
                 try {
                     nodes = Array.from(remoteRoot.querySelectorAll(selector));
                 } catch (e) {
-                    return { count: 0, samples: [] };
+                    return Number.NEGATIVE_INFINITY;
                 }
-                const samples = nodes.slice(0, 5).map(n => {
-                    const text = (n.textContent || '').replace(/\\s+/g, ' ').trim();
-                    return text.slice(0, 120);
-                }).filter(Boolean);
-                return { count: nodes.length, samples };
+                if (nodes.length < 2) return Number.NEGATIVE_INFINITY;
+                if (!el1.matches(selector) || !el2.matches(selector)) return Number.NEGATIVE_INFINITY;
+
+                const meta = getSamples(selector, mode);
+                if (mode === 'date') {
+                    if (meta.validCount < 2) return Number.NEGATIVE_INFINITY;
+                    const ratio = meta.validCount / Math.max(nodes.length, 1);
+                    if (ratio < 0.6) return Number.NEGATIVE_INFINITY;
+                    return ratio * 1000 - nodes.length;
+                }
+                return 800 - nodes.length;
+            }
+
+            function chooseBestSelector(el1, el2, mode) {
+                const node1 = getSelectionNode(el1, mode);
+                const node2 = getSelectionNode(el2, mode);
+                if (!node1 || !node2) return '';
+
+                const candidates = new Set();
+                if (mode === 'date') {
+                    candidates.add(deriveIndexedSiblingSelector(node1, node2, mode));
+                }
+                candidates.add(deriveCommonSelector(node1, node2));
+                candidates.add(buildSelector(node1));
+
+                let best = '';
+                let bestScore = Number.NEGATIVE_INFINITY;
+                candidates.forEach(candidate => {
+                    const score = scoreCandidate(candidate, node1, node2, mode);
+                    if (score > bestScore) {
+                        bestScore = score;
+                        best = candidate;
+                    }
+                });
+                return best;
             }
 
             function clearHover() {
@@ -140,6 +306,57 @@
             function clearPicked() {
                 if (pickedEl) pickedEl.classList.remove('selector-picked');
                 pickedEl = null;
+            }
+
+            function postSelection(mode, selector) {
+                const meta = getSamples(selector, mode);
+                window.parent.postMessage({
+                    type: 'selector-picked',
+                    mode,
+                    selector,
+                    count: meta.count,
+                    samples: meta.samples
+                }, '*');
+            }
+
+            function pickElement(el) {
+                const target = getSelectionNode(el, state.mode);
+                if (!target) return;
+                const clicks = state.mode === 'date' ? state.dateClicks : state.titleClicks;
+                if (clicks.length >= 2) {
+                    clicks.length = 0;
+                }
+                clicks.push(target);
+
+                clearPicked();
+                pickedEl = target;
+                pickedEl.classList.add('selector-picked');
+                updateBadge();
+
+                if (clicks.length < 2) {
+                    return;
+                }
+
+                const selector = chooseBestSelector(clicks[0], clicks[1], state.mode);
+                if (!selector) {
+                    clicks.length = 0;
+                    updateBadge();
+                    window.parent.postMessage({
+                        type: 'selector-error',
+                        message: state.mode === 'date'
+                            ? '날짜 선택자를 찾지 못했습니다. 같은 열 또는 같은 위치의 날짜를 다시 눌러 주세요.'
+                            : '제목 선택자를 찾지 못했습니다. 같은 목록의 제목 두 개를 다시 눌러 주세요.'
+                    }, '*');
+                    return;
+                }
+
+                if (state.mode === 'date') {
+                    state.dateSelector = selector;
+                } else {
+                    state.titleSelector = selector;
+                }
+                updateBadge();
+                postSelection(state.mode, selector);
             }
 
             document.addEventListener('mouseover', (event) => {
@@ -158,22 +375,11 @@
                 if (!remoteRoot.contains(event.target)) return;
                 event.preventDefault();
                 event.stopPropagation();
-                clearPicked();
-                pickedEl = event.target;
-                pickedEl.classList.add('selector-picked');
-                const selector = buildSelector(event.target);
-                const { count, samples } = getSamples(selector);
-                window.parent.postMessage({
-                    type: 'selector-picked',
-                    mode: currentMode,
-                    selector,
-                    count,
-                    samples
-                }, '*');
+                pickElement(event.target);
             }, true);
 
             function findByText(query) {
-                const needle = (query || '').trim();
+                const needle = normalizeText(query);
                 if (!needle) {
                     window.parent.postMessage({ type: 'selector-error', message: '텍스트를 입력하세요.' }, '*');
                     return;
@@ -182,31 +388,22 @@
                 let best = null;
                 let bestLen = Infinity;
                 candidates.forEach(el => {
-                    const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
-                    if (!text) return;
-                    if (text.includes(needle)) {
-                        if (text.length < bestLen) {
-                            best = el;
-                            bestLen = text.length;
-                        }
+                    const text = normalizeText(el.textContent);
+                    if (!text || !text.includes(needle)) return;
+                    if (text.length < bestLen) {
+                        best = el;
+                        bestLen = text.length;
                     }
                 });
                 if (!best) {
                     window.parent.postMessage({ type: 'selector-error', message: '해당 텍스트를 찾지 못했습니다.' }, '*');
                     return;
                 }
-                clearPicked();
-                pickedEl = best;
-                pickedEl.classList.add('selector-picked');
-                const selector = buildSelector(best);
-                const { count, samples } = getSamples(selector);
-                window.parent.postMessage({
-                    type: 'selector-picked',
-                    mode: currentMode,
-                    selector,
-                    count,
-                    samples
-                }, '*');
+                const selector = buildSelector(getSelectionNode(best, 'title'));
+                if (selector) {
+                    state.titleSelector = selector;
+                    postSelection('title', selector);
+                }
             }
 
             window.addEventListener('message', (event) => {
@@ -220,7 +417,7 @@
                 }
             });
 
-            setMode(currentMode);
+            setMode(state.mode);
             window.parent.postMessage({ type: 'selector-ready' }, '*');
         })();
     </script>
