@@ -2318,8 +2318,41 @@
             margin-top: 20px;
         }
 
-                .auth-modal {
+        .auth-modal {
             max-width: 420px;
+        }
+
+        .update-prompt-modal {
+            max-width: 460px;
+        }
+
+        .update-prompt-kicker {
+            font-size: 0.78rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--text-secondary);
+            margin-bottom: 10px;
+        }
+
+        .update-prompt-version {
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+            margin-bottom: 14px;
+        }
+
+        .update-prompt-body {
+            font-size: 0.95rem;
+            line-height: 1.6;
+            color: var(--text-primary);
+            margin-bottom: 20px;
+        }
+
+        .update-prompt-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            justify-content: flex-end;
         }
 
         .auth-status {
@@ -2849,6 +2882,20 @@
             </div>
         </div>
 
+        <div class="modal-overlay" id="updatePromptModal">
+            <div class="modal update-prompt-modal">
+                <div class="update-prompt-kicker">Update Ready</div>
+                <h2 id="updatePromptTitle">새 업데이트가 있습니다</h2>
+                <div class="update-prompt-version" id="updatePromptVersion">-</div>
+                <div class="update-prompt-body" id="updatePromptMessage">지금 업데이트하시겠습니까?</div>
+                <div class="update-prompt-actions">
+                    <a class="btn btn-secondary" id="updatePromptReleaseLink" href="#" target="_blank" rel="noopener" hidden>릴리스 보기</a>
+                    <button class="btn btn-secondary" type="button" onclick="dismissApprovedUpdatePrompt()">나중에</button>
+                    <button class="btn btn-primary" type="button" onclick="runUpdateFromPrompt()">지금 업데이트</button>
+                </div>
+            </div>
+        </div>
+
         <div class="settings-card">
             <h2>캐시 관리 (브라우저)</h2>
             <div class="cache-bar">
@@ -3144,6 +3191,7 @@
         const DESKTOP_NOTIFY_KEY = 'desktopNotifyEnabled';
         const AUTO_REFRESH_KEY = 'autoRefreshEnabled';
         const AUTO_REFRESH_AT_KEY = 'autoRefreshAt';
+        const UPDATE_PROMPT_DISMISSED_TAG_KEY = 'updatePromptDismissedTag';
         const AUTO_REFRESH_INTERVAL_MS = 20 * 60 * 1000;
         const NOTIFICATION_INTENT_POLL_MS = 3000;
         const ARTICLE_VIEW_STATE_RETENTION_DAYS = 45;
@@ -3420,6 +3468,7 @@
         let autoRefreshTimer = null;
         let notificationIntentTimer = null;
         let siteActivityMap = {};
+        let pendingApprovedUpdate = null;
 
         const categoryAccentMap = {
             '\uc785\ubc95\uc608\uace0': ['var(--color-legislation)', 'var(--color-legislation-soft)', 'var(--color-legislation-rgb)'],
@@ -3559,6 +3608,24 @@
             const date = value instanceof Date ? new Date(value.getTime()) : new Date(value);
             if (Number.isNaN(date.getTime())) return null;
             return date;
+        }
+
+        function getArticleCollectedAtMs(article) {
+            const time = parseDateTimeValue(article && article.collected_at)?.getTime();
+            return Number.isFinite(time) ? time : 0;
+        }
+
+        function compareArticlesForDisplay(a, b) {
+            const aIsNew = newArticleIds.has(a.id) ? 1 : 0;
+            const bIsNew = newArticleIds.has(b.id) ? 1 : 0;
+            if (aIsNew !== bIsNew) {
+                return bIsNew - aIsNew;
+            }
+            const timeDiff = getArticleCollectedAtMs(b) - getArticleCollectedAtMs(a);
+            if (timeDiff !== 0) {
+                return timeDiff;
+            }
+            return (Number(b && b.id) || 0) - (Number(a && a.id) || 0);
         }
 
         function formatMonitoringDateTime(value) {
@@ -3908,8 +3975,9 @@
             }
         }
 
-        async function runUpdate() {
-            if (!confirm('업데이트를 진행할까요?')) return;
+        async function runUpdate(options = {}) {
+            const skipConfirm = options && options.skipConfirm === true;
+            if (!skipConfirm && !confirm('업데이트를 진행할까요?')) return;
             const btn = document.getElementById('runUpdateBtn');
             if (btn?.disabled) return;
             if (btn) btn.disabled = true;
@@ -3942,6 +4010,66 @@
                 showToast(`업데이트 실패: ${e.message}`);
             } finally {
                 if (btn) btn.disabled = false;
+            }
+        }
+
+        function dismissApprovedUpdatePrompt() {
+            const modal = document.getElementById('updatePromptModal');
+            if (modal) modal.classList.remove('active');
+            if (pendingApprovedUpdate?.latest_version) {
+                localStorage.setItem(UPDATE_PROMPT_DISMISSED_TAG_KEY, pendingApprovedUpdate.latest_version);
+            }
+            pendingApprovedUpdate = null;
+        }
+
+        function showApprovedUpdatePrompt(status) {
+            const modal = document.getElementById('updatePromptModal');
+            if (!modal || !status?.latest_version) return;
+
+            pendingApprovedUpdate = status;
+
+            const titleEl = document.getElementById('updatePromptTitle');
+            const versionEl = document.getElementById('updatePromptVersion');
+            const messageEl = document.getElementById('updatePromptMessage');
+            const linkEl = document.getElementById('updatePromptReleaseLink');
+
+            if (titleEl) titleEl.textContent = '새 업데이트가 있습니다';
+            if (versionEl) versionEl.textContent = `${status.current_version || APP_VERSION_FALLBACK} → ${status.latest_version}`;
+            if (messageEl) messageEl.textContent = status.message || `새 버전 ${status.latest_version} 이 있습니다. 지금 업데이트하시겠습니까?`;
+
+            if (linkEl) {
+                if (status.release_url) {
+                    linkEl.href = status.release_url;
+                    linkEl.hidden = false;
+                } else {
+                    linkEl.hidden = true;
+                    linkEl.removeAttribute('href');
+                }
+            }
+
+            modal.classList.add('active');
+        }
+
+        async function runUpdateFromPrompt() {
+            const modal = document.getElementById('updatePromptModal');
+            if (modal) modal.classList.remove('active');
+            pendingApprovedUpdate = null;
+            await runUpdate({ skipConfirm: true });
+        }
+
+        async function checkForApprovedUpdate() {
+            try {
+                const res = await fetch(`/api/update-status?_ts=${Date.now()}`, {
+                    cache: 'no-store',
+                    headers: { 'Cache-Control': 'no-cache' }
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok || !data.checked || !data.update_available || !data.latest_version) return;
+                const dismissedTag = localStorage.getItem(UPDATE_PROMPT_DISMISSED_TAG_KEY) || '';
+                if (dismissedTag === data.latest_version) return;
+                showApprovedUpdatePrompt(data);
+            } catch (e) {
+                console.warn('approved update check failed', e);
             }
         }
 
@@ -4148,10 +4276,7 @@
                 (a.category || '기타') === currentCategory &&
                 (a.site_name || '미지정') === selectedSiteName
             );
-            selectedArticles.sort((a, b) => {
-                const ta = new Date(b.collected_at).getTime() - new Date(a.collected_at).getTime();
-                return Number.isFinite(ta) ? ta : 0;
-            });
+            selectedArticles.sort(compareArticlesForDisplay);
 
             const latestTime = selectedArticles.length ? formatTime(selectedArticles[0].collected_at) : '';
             const newCount = selectedArticles.filter(a => newArticleIds.has(a.id)).length;
@@ -4296,10 +4421,7 @@
                 }
 
                 const selectedArticles = (groupedBySite[selectedSiteName] || []).slice();
-                selectedArticles.sort((a, b) => {
-                    const ta = new Date(b.collected_at).getTime() - new Date(a.collected_at).getTime();
-                    return Number.isFinite(ta) ? ta : 0;
-                });
+                selectedArticles.sort(compareArticlesForDisplay);
 
                 const latestTime = selectedArticles.length ? formatTime(selectedArticles[0].collected_at) : '';
                 const summaryParts = [];
@@ -4391,10 +4513,7 @@
                 const rgb = getCategoryRgb(cat);
                 const isExpanded = !!expandedCategories[cat];
 
-                items.sort((a, b) => {
-                    const ta = new Date(b.collected_at).getTime() - new Date(a.collected_at).getTime();
-                    return Number.isFinite(ta) ? ta : 0;
-                });
+                items.sort(compareArticlesForDisplay);
 
                 const visibleItems = items.slice(0, OVERVIEW_PREVIEW_LIMIT);
                 const hiddenItems = items.slice(OVERVIEW_PREVIEW_LIMIT);
@@ -5709,6 +5828,7 @@
                 initAutoRefresh();
                 initNotificationIntentPolling();
                 await consumePendingNotificationIntent();
+                await checkForApprovedUpdate();
             });
         }
 let revealObserver = null;

@@ -1,5 +1,8 @@
 param(
-    [string]$Version = ""
+    [string]$Version = "",
+    [ValidateSet('test', 'approved')]
+    [string]$Channel = "test",
+    [string]$Notice = ""
 )
 
 Set-StrictMode -Version Latest
@@ -29,10 +32,10 @@ function Get-RepoFromUpdateUrl([string]$Url) {
     return ''
 }
 
-function Test-GitHubReleaseExists([string]$GhPath, [string]$Version, [string]$Repo) {
+function Get-ReleaseView([string]$GhPath, [string]$Version, [string]$Repo) {
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $GhPath
-    $startInfo.Arguments = ('release view "{0}" --repo "{1}"' -f $Version, $Repo)
+    $startInfo.Arguments = ('release view "{0}" --repo "{1}" --json databaseId,isPrerelease,isDraft,url' -f $Version, $Repo)
     $startInfo.UseShellExecute = $false
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
@@ -40,10 +43,29 @@ function Test-GitHubReleaseExists([string]$GhPath, [string]$Version, [string]$Re
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
     $process.Start() | Out-Null
-    $null = $process.StandardOutput.ReadToEnd()
+    $json = $process.StandardOutput.ReadToEnd()
     $null = $process.StandardError.ReadToEnd()
     $process.WaitForExit()
-    return ($process.ExitCode -eq 0)
+
+    if ($process.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($json)) {
+        return $null
+    }
+    return $json | ConvertFrom-Json
+}
+
+function New-ReleaseNotesContent([string]$Path, [string]$NoticeText) {
+    $base = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8).Trim()
+    if ([string]::IsNullOrWhiteSpace($NoticeText)) {
+        return $base
+    }
+    return ("NOTICE: {0}{1}{1}{2}" -f $NoticeText.Trim(), [Environment]::NewLine, $base).Trim()
+}
+
+function New-ReleaseNotesFile([string]$NotesPath, [string]$NoticeText) {
+    $tempPath = [System.IO.Path]::GetTempFileName()
+    $content = New-ReleaseNotesContent -Path $NotesPath -NoticeText $NoticeText
+    [System.IO.File]::WriteAllText($tempPath, $content, [System.Text.Encoding]::UTF8)
+    return $tempPath
 }
 
 $sourceDir = Split-Path -Parent $PSCommandPath
@@ -94,14 +116,50 @@ if ($LASTEXITCODE -ne 0) {
     throw 'GitHub CLI authentication failed. Run gh auth login first.'
 }
 
-if (Test-GitHubReleaseExists -GhPath $gh -Version $Version -Repo $repo) {
-    throw "Release tag $Version already exists in $repo. Use a new version tag."
-}
+$releaseNotesPath = New-ReleaseNotesFile -NotesPath $notesPath -NoticeText $Notice
 
-Write-Step "Publishing $Version to $repo"
-& $gh release create $Version $zipPath $manifestPath $shaPath --repo $repo --title $Version --notes-file $notesPath --latest
-if ($LASTEXITCODE -ne 0) {
-    throw 'gh release create failed.'
-}
+try {
+    $existingRelease = Get-ReleaseView -GhPath $gh -Version $Version -Repo $repo
 
-Write-Ok "Published GitHub release $Version"
+    if ($null -eq $existingRelease) {
+        Write-Step "Publishing $Version to $repo ($Channel)"
+        $createArgs = @(
+            'release', 'create', $Version,
+            $zipPath,
+            $manifestPath,
+            $shaPath,
+            '--repo', $repo,
+            '--title', $Version,
+            '--notes-file', $releaseNotesPath
+        )
+        if ($Channel -eq 'test') {
+            $createArgs += @('--prerelease', '--latest=false')
+        }
+        else {
+            $createArgs += '--latest'
+        }
+        & $gh @createArgs
+        if ($LASTEXITCODE -ne 0) {
+            throw 'gh release create failed.'
+        }
+        Write-Ok "Published GitHub release $Version ($Channel)"
+        return
+    }
+
+    if ($Channel -eq 'test') {
+        throw "Release tag $Version already exists in $repo. Use a new version tag or promote it with -Channel approved."
+    }
+
+    Write-Step "Promoting $Version to approved release in $repo"
+    & $gh release edit $Version --repo $repo --title $Version --notes-file $releaseNotesPath --prerelease=false --draft=false --latest
+    if ($LASTEXITCODE -ne 0) {
+        throw 'gh release edit failed.'
+    }
+
+    Write-Ok "Promoted GitHub release $Version to approved/latest"
+}
+finally {
+    if (Test-Path -LiteralPath $releaseNotesPath) {
+        Remove-Item -LiteralPath $releaseNotesPath -Force -ErrorAction SilentlyContinue
+    }
+}

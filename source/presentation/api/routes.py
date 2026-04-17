@@ -28,7 +28,7 @@ import re
 import json
 
 from config import get_settings
-from config.versioning import resolve_runtime_version
+from config.versioning import parse_version_number, resolve_runtime_version
 from infrastructure.database import get_db, ArticleRepository, SiteRepository, CrawlLogRepository
 from infrastructure.crawlers import WebCrawler
 from infrastructure.notifiers import get_notifier
@@ -97,6 +97,16 @@ class UpdateResponse(BaseModel):
 
 class VersionResponse(BaseModel):
     version: str
+
+
+class UpdateStatusResponse(BaseModel):
+    checked: bool
+    current_version: str
+    latest_version: str
+    update_available: bool
+    message: str
+    release_url: Optional[str] = None
+    error: Optional[str] = None
 
 
 class UiPrefsResponse(BaseModel):
@@ -289,6 +299,108 @@ def _extract_release_tag_from_payload(payload_dir: Path) -> Optional[str]:
     return value or None
 
 
+def _extract_repo_from_update_url(update_url: str) -> Optional[str]:
+    if not update_url:
+        return None
+    match = re.search(r"github\.com/([^/]+/[^/]+)/releases/", update_url)
+    if not match:
+        return None
+    return match.group(1)
+
+
+def _extract_asset_name_from_update_url(update_url: str) -> str:
+    try:
+        name = Path(urlparse(update_url).path).name
+        return name or "MonitoringDashboard.zip"
+    except Exception:
+        return "MonitoringDashboard.zip"
+
+
+def _is_newer_version(candidate: str, current: str) -> bool:
+    candidate_num = parse_version_number(candidate)
+    current_num = parse_version_number(current)
+    if candidate_num is not None and current_num is not None:
+        return candidate_num > current_num
+    if candidate_num is not None:
+        return True
+    if current_num is not None:
+        return False
+    return bool(candidate and current and candidate.strip() != current.strip())
+
+
+def _extract_release_notice(body: str, latest_version: str) -> str:
+    generic = f"새 버전 {latest_version} 이 있습니다. 지금 업데이트하시겠습니까?"
+    if not body:
+        return generic
+
+    cleaned_lines: list[str] = []
+    for raw_line in str(body).splitlines():
+        line = re.sub(r"^[#>\-\*\s]+", "", raw_line or "").strip()
+        if not line:
+            continue
+        cleaned_lines.append(line)
+
+    for line in cleaned_lines:
+        upper = line.upper()
+        if upper.startswith("NOTICE:"):
+            message = line.split(":", 1)[1].strip()
+            return message or generic
+
+    return generic
+
+
+async def _fetch_latest_release_status(update_url: str, current_version: str) -> UpdateStatusResponse:
+    repo = _extract_repo_from_update_url(update_url)
+    if not repo:
+        return UpdateStatusResponse(
+            checked=False,
+            current_version=current_version,
+            latest_version="",
+            update_available=False,
+            message="",
+            error="github repo parse failed",
+        )
+
+    asset_name = _extract_asset_name_from_update_url(update_url)
+    api_url = f"https://api.github.com/repos/{repo}/releases/latest"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers=headers) as client:
+            resp = await client.get(api_url)
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPError as e:
+        return UpdateStatusResponse(
+            checked=False,
+            current_version=current_version,
+            latest_version="",
+            update_available=False,
+            message="",
+            error=f"release check failed: {e}",
+        )
+
+    latest_version = str(data.get("tag_name") or "").strip()
+    release_url = data.get("html_url")
+    assets = data.get("assets") if isinstance(data.get("assets"), list) else []
+    has_asset = any(str(asset.get("name") or "").strip() == asset_name for asset in assets if isinstance(asset, dict))
+    update_available = bool(latest_version and has_asset and _is_newer_version(latest_version, current_version))
+    message = _extract_release_notice(str(data.get("body") or ""), latest_version) if latest_version else ""
+
+    return UpdateStatusResponse(
+        checked=True,
+        current_version=current_version,
+        latest_version=latest_version,
+        update_available=update_available,
+        message=message,
+        release_url=release_url,
+        error=None if has_asset else f"asset not found: {asset_name}",
+    )
+
+
 def _ps_single_quoted(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
@@ -479,18 +591,28 @@ def _schedule_exit(delay: float = 1.0) -> None:
     threading.Thread(target=_exit, daemon=True).start()
 
 
+def _resolve_powershell_exe() -> str:
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    candidate = Path(system_root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    return str(candidate) if candidate.exists() else "powershell.exe"
+
+
+def _hidden_creation_flags() -> int:
+    # DETACHED_PROCESS prevents powershell -File from starting reliably in this update flow.
+    return int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
 def _launch_update_script(base_dir: Path, log_path: Path) -> str:
     """
     Launch the hidden PowerShell updater once.
     """
-    creation_flags = 0
-    for attr in ("CREATE_NEW_PROCESS_GROUP", "DETACHED_PROCESS", "CREATE_NO_WINDOW"):
-        creation_flags |= int(getattr(subprocess, attr, 0))
+    creation_flags = _hidden_creation_flags()
+    powershell_exe = _resolve_powershell_exe()
 
     launch_plan = [(
         "powershell -File apply_update.ps1",
         [
-            "powershell",
+            powershell_exe,
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",
@@ -731,6 +853,22 @@ async def update_app():
 @router.get("/version", response_model=VersionResponse)
 def get_app_version():
     return VersionResponse(version=resolve_runtime_version())
+
+
+@router.get("/update-status", response_model=UpdateStatusResponse)
+async def get_update_status():
+    settings = get_settings()
+    current_version = resolve_runtime_version()
+    if not settings.update_url:
+        return UpdateStatusResponse(
+            checked=False,
+            current_version=current_version,
+            latest_version="",
+            update_available=False,
+            message="",
+            error="UPDATE_URL not configured",
+        )
+    return await _fetch_latest_release_status(settings.update_url, current_version)
 
 
 @router.get("/ui-prefs", response_model=UiPrefsResponse)
