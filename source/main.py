@@ -41,6 +41,11 @@ scheduler = AsyncIOScheduler()
 scheduled_category_cursor = 0
 DEFAULT_SITE_INTERVAL_MINUTES = 20
 LEGACY_INTERVAL_MIGRATION_MARKER = ".interval_defaults_20m_migrated"
+LEGACY_SITE_URL_REPLACEMENTS = {
+    ("환경부 보도·설명자료", Category.PRESS_RELEASE.value): {
+        "https://www.mcee.go.kr/home/web/index.do?menuId=10525": "https://www.mcee.go.kr/home/web/index.do?menuId=10598",
+    },
+}
 
 
 def _parse_date_key(date_key: str | None) -> date | None:
@@ -254,22 +259,71 @@ def load_sites_from_config():
         return []
 
 
+def _site_identity(site: Site) -> tuple[str, str]:
+    return ((site.name or "").strip(), (site.category or "").strip())
+
+
+def _site_name_key(site: Site) -> str:
+    return (site.name or "").strip()
+
+
+def _site_url_key(url: str | None) -> str:
+    return (url or "").strip()
+
+
+def _deactivate_legacy_site_duplicates(repo: SiteRepository) -> int:
+    sites = repo.find_all(active_only=False)
+    changed = 0
+    for identity, replacements in LEGACY_SITE_URL_REPLACEMENTS.items():
+        old_urls = set(replacements.keys())
+        new_urls = set(replacements.values())
+        has_new_site = any(
+            _site_identity(site) == identity and _site_url_key(site.url) in new_urls and site.is_active
+            for site in sites
+        )
+        if not has_new_site:
+            continue
+        for site in sites:
+            if _site_identity(site) == identity and _site_url_key(site.url) in old_urls and site.is_active:
+                site.is_active = False
+                repo.save(site)
+                changed += 1
+    return changed
+
+
 def sync_sites_from_config(repo: SiteRepository, config_sites: list[Site]) -> tuple[int, int]:
     """기존 DB에 없는 사이트 추가 및 누락된 날짜 선택자 보완"""
     added = 0
     updated = 0
+    existing_sites = repo.find_all(active_only=False)
+    by_url = {_site_url_key(site.url): site for site in existing_sites if _site_url_key(site.url)}
+    by_identity: dict[tuple[str, str], Site] = {}
+    by_name: dict[str, Site] = {}
+    for site in existing_sites:
+        by_identity.setdefault(_site_identity(site), site)
+        by_name.setdefault(_site_name_key(site), site)
 
     for cfg in config_sites:
         if not cfg.url:
             continue
 
-        existing = repo.find_by_url(cfg.url)
+        cfg_identity = _site_identity(cfg)
+        existing = (
+            by_url.get(_site_url_key(cfg.url))
+            or by_identity.get(cfg_identity)
+            or by_name.get(_site_name_key(cfg))
+        )
         if not existing:
             repo.save(cfg)
             added += 1
             continue
 
         changed = False
+        legacy_replacements = LEGACY_SITE_URL_REPLACEMENTS.get(cfg_identity, {})
+        replacement_url = legacy_replacements.get(_site_url_key(existing.url))
+        if replacement_url and replacement_url == _site_url_key(cfg.url):
+            existing.url = cfg.url
+            changed = True
 
         if cfg.selector and (
             not existing.selector
@@ -299,6 +353,7 @@ def sync_sites_from_config(repo: SiteRepository, config_sites: list[Site]) -> tu
             repo.save(existing)
             updated += 1
 
+    updated += _deactivate_legacy_site_duplicates(repo)
     return added, updated
 
 

@@ -33,6 +33,7 @@ class ArticleRepository(IArticleRepository):
             content_summary=article.content_summary,
             collected_at=article.collected_at,
             date_key=article.date_key,
+            source_order=article.source_order,
         )
         self.session.add(model)
         self.session.commit()
@@ -52,9 +53,15 @@ class ArticleRepository(IArticleRepository):
             )
             if existing:
                 # If saved with a wrong date_key, fix it instead of skipping.
-                if existing.date_key != article.date_key or existing.collected_at != article.collected_at:
+                article_source_order = int(getattr(article, "source_order", 0) or 0)
+                if (
+                    existing.date_key != article.date_key
+                    or existing.collected_at != article.collected_at
+                    or (existing.source_order or 0) != article_source_order
+                ):
                     existing.date_key = article.date_key
                     existing.collected_at = article.collected_at
+                    existing.source_order = article_source_order
                     if article.title and existing.title != article.title:
                         existing.title = article.title
                     if article.content_summary and existing.content_summary != article.content_summary:
@@ -75,6 +82,7 @@ class ArticleRepository(IArticleRepository):
                 )
                 if existing_td and article.url and existing_td.url != article.url:
                     existing_td.url = article.url
+                    existing_td.source_order = int(getattr(article, "source_order", 0) or 0)
                     if article.content_summary and existing_td.content_summary != article.content_summary:
                         existing_td.content_summary = article.content_summary
                     updated_count += 1
@@ -87,6 +95,7 @@ class ArticleRepository(IArticleRepository):
                 content_summary=article.content_summary,
                 collected_at=article.collected_at,
                 date_key=article.date_key,
+                source_order=article.source_order,
             )
             self.session.add(model)
             saved_count += 1
@@ -101,7 +110,12 @@ class ArticleRepository(IArticleRepository):
             self.session.query(ArticleModel, SiteModel)
             .join(SiteModel)
             .filter(ArticleModel.date_key == date_key)
-            .order_by(ArticleModel.collected_at.desc())
+            .order_by(
+                ArticleModel.collected_at.desc(),
+                SiteModel.id.asc(),
+                ArticleModel.source_order.asc(),
+                ArticleModel.id.asc(),
+            )
         )
         
         return [self._to_entity(m, s) for m, s in query.all()]
@@ -115,7 +129,11 @@ class ArticleRepository(IArticleRepository):
                 ArticleModel.site_id == site_id,
                 ArticleModel.date_key == date_key
             )
-            .order_by(ArticleModel.collected_at.desc())
+            .order_by(
+                ArticleModel.collected_at.desc(),
+                ArticleModel.source_order.asc(),
+                ArticleModel.id.asc(),
+            )
         )
         
         return [self._to_entity(m, s) for m, s in query.all()]
@@ -178,6 +196,7 @@ class ArticleRepository(IArticleRepository):
             content_summary=model.content_summary,
             collected_at=model.collected_at,
             date_key=model.date_key,
+            source_order=getattr(model, "source_order", 0) or 0,
             site_name=site.name,
             category=site.category or "기타",
         )

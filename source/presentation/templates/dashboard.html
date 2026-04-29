@@ -3615,17 +3615,25 @@
             return Number.isFinite(time) ? time : 0;
         }
 
+        function getArticleSourceOrder(article) {
+            const order = Number(article && article.source_order);
+            return Number.isFinite(order) ? order : Number.MAX_SAFE_INTEGER;
+        }
+
         function compareArticlesForDisplay(a, b) {
-            const aIsNew = newArticleIds.has(a.id) ? 1 : 0;
-            const bIsNew = newArticleIds.has(b.id) ? 1 : 0;
-            if (aIsNew !== bIsNew) {
-                return bIsNew - aIsNew;
-            }
             const timeDiff = getArticleCollectedAtMs(b) - getArticleCollectedAtMs(a);
             if (timeDiff !== 0) {
                 return timeDiff;
             }
-            return (Number(b && b.id) || 0) - (Number(a && a.id) || 0);
+            const siteDiff = (Number(a && a.site_id) || 0) - (Number(b && b.site_id) || 0);
+            if (siteDiff !== 0) {
+                return siteDiff;
+            }
+            const orderDiff = getArticleSourceOrder(a) - getArticleSourceOrder(b);
+            if (orderDiff !== 0) {
+                return orderDiff;
+            }
+            return (Number(a && a.id) || 0) - (Number(b && b.id) || 0);
         }
 
         function formatMonitoringDateTime(value) {

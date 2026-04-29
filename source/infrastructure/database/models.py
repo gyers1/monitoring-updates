@@ -60,12 +60,14 @@ class ArticleModel(Base):
     content_summary = Column(Text, default="")
     collected_at = Column(DateTime, default=datetime.now)
     date_key = Column(String(10), nullable=False)
+    source_order = Column(Integer, default=0)
 
     site = relationship("SiteModel", back_populates="articles")
 
     __table_args__ = (
         Index("ix_articles_date_key", "date_key"),
         Index("ix_articles_site_date", "site_id", "date_key"),
+        Index("ix_articles_source_order", "site_id", "date_key", "source_order"),
     )
 
 
@@ -132,6 +134,7 @@ def init_database():
     engine = get_engine()
     Base.metadata.create_all(bind=engine)
     _ensure_site_columns(engine)
+    _ensure_article_columns(engine)
     print("[OK] Database tables created")
 
 
@@ -156,6 +159,59 @@ def _ensure_site_columns(engine):
         for name, col_type in additions.items():
             if name not in existing:
                 conn.exec_driver_sql(f"ALTER TABLE sites ADD COLUMN {name} {col_type}")
+
+
+def _ensure_article_columns(engine):
+    """Ensure legacy SQLite databases have required article columns."""
+
+    with engine.begin() as conn:
+        cols = conn.exec_driver_sql("PRAGMA table_info(articles)").fetchall()
+        existing = {row[1] for row in cols}
+        added_source_order = False
+        if "source_order" not in existing:
+            conn.exec_driver_sql("ALTER TABLE articles ADD COLUMN source_order INTEGER DEFAULT 0")
+            added_source_order = True
+        conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_articles_source_order ON articles (site_id, date_key, source_order)"
+        )
+
+        needs_backfill = added_source_order
+        if not needs_backfill:
+            row = conn.exec_driver_sql(
+                """
+                SELECT COUNT(*)
+                FROM (
+                    SELECT site_id, date_key, COUNT(*) AS c, MAX(COALESCE(source_order, 0)) AS max_order
+                    FROM articles
+                    GROUP BY site_id, date_key
+                    HAVING c > 1 AND max_order = 0
+                )
+                """
+            ).fetchone()
+            needs_backfill = bool(row and row[0])
+
+        if needs_backfill:
+            _backfill_article_source_order(conn)
+
+
+def _backfill_article_source_order(conn):
+    """Backfill display order from insertion order for already-collected rows."""
+
+    rows = conn.exec_driver_sql(
+        "SELECT id, site_id, date_key FROM articles ORDER BY site_id ASC, date_key ASC, id ASC"
+    ).fetchall()
+    current_key = None
+    source_order = 0
+    for row in rows:
+        key = (row[1], row[2])
+        if key != current_key:
+            current_key = key
+            source_order = 0
+        conn.exec_driver_sql(
+            "UPDATE articles SET source_order = ? WHERE id = ?",
+            (source_order, row[0]),
+        )
+        source_order += 1
 
 
 def _resolve_sqlite_path() -> Path | None:

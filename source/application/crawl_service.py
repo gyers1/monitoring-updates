@@ -73,6 +73,9 @@ class CrawlService:
         if target_date:
             date_key = target_date.strftime("%Y-%m-%d")
             result.articles = [a for a in result.articles if a.date_key == date_key]
+
+        for source_order, article in enumerate(result.articles):
+            article.source_order = source_order
         
         # 신규 게시글 저장 (중복 제외)
         if result.status == CrawlStatus.SUCCESS and result.articles:

@@ -67,6 +67,7 @@ class Article:
     content_summary: str = ""
     collected_at: datetime = field(default_factory=datetime.now)
     date_key: str = ""
+    source_order: int = 0
     site_name: str = ""
     category: str = Category.OTHER.value
 

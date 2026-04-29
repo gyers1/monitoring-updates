@@ -41,11 +41,13 @@ from infrastructure.ui_prefs import load_ui_prefs, save_ui_prefs
 # Pydantic 스키마
 class ArticleResponse(BaseModel):
     id: int
+    site_id: int
     site_name: str
     category: str
     title: str
     url: str
     collected_at: datetime
+    source_order: int = 0
     
     class Config:
         from_attributes = True
@@ -751,11 +753,13 @@ def get_articles(
     return [
         ArticleResponse(
             id=a.id,
+            site_id=a.site_id,
             site_name=a.site_name,
             category=a.category,
             title=a.title,
             url=a.url,
             collected_at=a.collected_at,
+            source_order=a.source_order,
         )
         for a in articles
     ]

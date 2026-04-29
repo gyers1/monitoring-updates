@@ -124,7 +124,7 @@
     },
     {
       "name": "환경부 보도·설명자료",
-      "url": "https://www.mcee.go.kr/home/web/index.do?menuId=10525",
+      "url": "https://www.mcee.go.kr/home/web/index.do?menuId=10598",
       "selector": "#content_body table tbody tr td.al a",
       "date_selector": "#content_body table tbody tr td:nth-child(5)",
       "date_param": "",
